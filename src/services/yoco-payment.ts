@@ -23,6 +23,8 @@ import {
   WebhookActionResult,
 } from "@medusajs/framework/types"
 import { randomUUID } from "crypto"
+import { fromCents, toCents } from "../utils/money"
+import { verifyWebhookSignature } from "../utils/webhook"
 import {
   YocoOptions,
   YocoOptionsSchema,
@@ -135,7 +137,7 @@ class YocoPaymentService extends AbstractPaymentProvider<YocoOptions> {
     const { amount, currency_code, context } = input
 
     try {
-      const amountInCents = Math.round(Number(amount))
+      const amountInCents = toCents(amount)
 
       // Validate amount
       if (amountInCents < MIN_AMOUNT_CENTS) {
@@ -201,9 +203,9 @@ class YocoPaymentService extends AbstractPaymentProvider<YocoOptions> {
     const { amount, currency_code, context } = input
 
     try {
-      const amountInCents = Math.round(Number(amount))
+      const amountInCents = toCents(amount)
 
-      if (amountInCents < 200) {
+      if (amountInCents < MIN_AMOUNT_CENTS) {
         throw new Error("Minimum amount is R2.00")
       }
 
@@ -308,7 +310,8 @@ class YocoPaymentService extends AbstractPaymentProvider<YocoOptions> {
 
   async refundPayment(input: RefundPaymentInput): Promise<RefundPaymentOutput> {
     const id = input.data?.yocoCheckoutId as string
-    const refundAmount = input.amount ? Math.round(Number(input.amount)) : undefined
+    // Medusa passes major units; Yoco refunds in cents.
+    const refundAmount = input.amount ? toCents(input.amount) : undefined
 
     if (!id) {
       throw new YocoPaymentError("[Yoco] No checkout ID provided for refund", YocoErrorCode.API_ERROR)
@@ -388,17 +391,40 @@ class YocoPaymentService extends AbstractPaymentProvider<YocoOptions> {
   }
 
   async getWebhookActionAndData(payload: ProviderWebhookPayload["payload"]): Promise<WebhookActionResult> {
-    const event = payload.data as unknown as YocoWebhookEvent
+    const secret = this.options_.webhookSecret
+    if (!secret) {
+      // Always logged (not behind `debug`): a silently ignored webhook is hard to diagnose.
+      this.logger_.warn("[Yoco] Webhook ignored: no webhookSecret configured")
+      return { action: "not_supported" }
+    }
+
+    const raw = payload.rawData as unknown
+    const rawBody =
+      typeof raw === "string" ? raw : raw ? Buffer.from(raw as Uint8Array).toString("utf8") : ""
+
+    if (!verifyWebhookSignature(rawBody, (payload.headers ?? {}) as Record<string, string>, secret)) {
+      this.logger_.warn("[Yoco] Webhook ignored: invalid signature")
+      return { action: "not_supported" }
+    }
+
+    let event: YocoWebhookEvent
+    try {
+      event = JSON.parse(rawBody) as YocoWebhookEvent
+    } catch {
+      return { action: "not_supported" }
+    }
     this.log(`Webhook: ${event.type}`)
 
-    const sessionId = (event.payload.metadata?.session_id as string) || ""
+    const sessionId = (event.payload?.metadata?.session_id as string) || ""
+    // Yoco reports cents; Medusa expects major units.
+    const data = { session_id: sessionId, amount: fromCents(event.payload?.amount) }
 
     if (event.type === "payment.succeeded") {
-      return { action: "authorized", data: { session_id: sessionId, amount: event.payload.amount } }
+      return { action: "authorized", data }
     }
 
     if (event.type === "payment.failed") {
-      return { action: "failed", data: { session_id: sessionId, amount: event.payload.amount } }
+      return { action: "failed", data }
     }
 
     return { action: "not_supported" }
