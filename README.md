@@ -158,10 +158,20 @@ You can access the session ID from the URL query parameter to complete the order
 
 For production, set up webhooks in your Yoco Business Portal:
 
-1. Go to **Selling Online → Payment Gateway → Webhooks**
-2. Add webhook URL: `https://your-domain.com/hooks/payment/yoco_yoco`
-3. Select events: `payment.succeeded`, `payment.failed`
-4. Copy the signing secret (`whsec_...`) of the subscription into the `webhookSecret` option:
+Webhooks are registered through the API; there is no screen for it in the Yoco portal.
+
+1. Register the webhook with your secret key (the URL must be public https):
+
+```bash
+curl -X POST https://payments.yoco.com/api/webhooks \
+  -H "Authorization: Bearer $YOCO_SECRET_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "medusa", "url": "https://your-domain.com/hooks/payment/yoco_yoco"}'
+```
+
+2. The response contains a `secret` (`whsec_...`). It is only returned once, so store it straight away. A test key registers a test-mode webhook, a live key a live one.
+3. The plugin handles `payment.succeeded` and `payment.failed`.
+4. Put that `whsec_...` secret in the `webhookSecret` option:
 
 ```typescript
 options: {
