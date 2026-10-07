@@ -186,6 +186,75 @@ describe("YocoPaymentService", () => {
     })
   })
 
+  describe("Payment session id and retries", () => {
+    const make = () => new YocoPaymentService({ logger: mockLogger }, { secretKey: "sk_test_1234567890", debug: false })
+    const checkout = { id: "ch_1", redirectUrl: "https://x", status: "created" }
+
+    it("reads the session id Medusa provides (data.session_id / context.idempotency_key)", async () => {
+      const service = make()
+      const api = jest.fn().mockResolvedValue(checkout)
+      ;(service as any).api = api
+
+      await service.initiatePayment({
+        amount: 10,
+        currency_code: "zar",
+        data: { session_id: "payses_1" },
+        context: { idempotency_key: "payses_1" },
+      } as any)
+
+      const [, , payload, key] = api.mock.calls[0]
+      expect(payload.metadata.session_id).toBe("payses_1")
+      expect(payload.externalId).toBe("payses_1")
+      expect(key).toBe("initiate-payses_1-1000")
+    })
+
+    it("falls back to context.idempotency_key when data has no session id", async () => {
+      const service = make()
+      const api = jest.fn().mockResolvedValue(checkout)
+      ;(service as any).api = api
+
+      await service.initiatePayment({ amount: 10, currency_code: "zar", context: { idempotency_key: "payses_2" } } as any)
+
+      expect(api.mock.calls[0][2].metadata.session_id).toBe("payses_2")
+    })
+
+    it("uses a different idempotency key for a new session of the same cart and amount", async () => {
+      const service = make()
+      const api = jest.fn().mockResolvedValue(checkout)
+      ;(service as any).api = api
+
+      for (const id of ["payses_a", "payses_b"]) {
+        await service.initiatePayment({ amount: 10, currency_code: "zar", data: { session_id: id }, context: { idempotency_key: id } } as any)
+      }
+
+      expect(api.mock.calls[0][3]).not.toBe(api.mock.calls[1][3])
+    })
+
+    it("never shares an idempotency key when the session id is missing", async () => {
+      const service = make()
+      const api = jest.fn().mockResolvedValue(checkout)
+      ;(service as any).api = api
+
+      await service.initiatePayment({ amount: 10, currency_code: "zar", context: {} } as any)
+      await service.initiatePayment({ amount: 10, currency_code: "zar", context: {} } as any)
+
+      expect(api.mock.calls[0][3]).not.toBe(api.mock.calls[1][3])
+    })
+
+    it("keeps the session id in the stored data and reuses it on update", async () => {
+      const service = make()
+      const api = jest.fn().mockResolvedValue(checkout)
+      ;(service as any).api = api
+
+      const created = await service.initiatePayment({ amount: 10, currency_code: "zar", data: { session_id: "payses_3" }, context: { idempotency_key: "payses_3" } } as any)
+      expect(created.data?.session_id).toBe("payses_3")
+
+      await service.updatePayment({ amount: 20, currency_code: "zar", data: created.data, context: {} } as any)
+      expect(api.mock.calls[1][2].metadata.session_id).toBe("payses_3")
+      expect(api.mock.calls[1][2].amount).toBe(2000)
+    })
+  })
+
   describe("Webhooks", () => {
     const crypto = require("crypto")
     const secret = "whsec_" + Buffer.from("test-secret-bytes").toString("base64")

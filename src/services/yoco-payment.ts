@@ -65,6 +65,23 @@ class YocoPaymentService extends AbstractPaymentProvider<YocoOptions> {
   // HELPERS
   // ============================================
 
+  /**
+   * Medusa hands the payment session id to providers as `data.session_id` (initiate) and
+   * `context.idempotency_key` (initiate / update); `context.session_id` is never set.
+   * Reading the wrong field left every checkout with an empty session id, so all sessions
+   * of a cart shared one idempotency key (a retry reused the cancelled checkout) and
+   * webhooks could not be matched back to a session.
+   */
+  private sessionIdOf(input: { data?: Record<string, unknown>; context?: unknown }): string {
+    const context = (input.context ?? {}) as Record<string, unknown>
+    return (
+      (input.data?.session_id as string | undefined) ||
+      (context.idempotency_key as string | undefined) ||
+      (context.session_id as string | undefined) ||
+      ""
+    )
+  }
+
   private log(msg: string, level: "info" | "warn" | "error" = "info") {
     if (this.options_.debug) {
       this.logger_[level](`[Yoco] ${msg}`)
@@ -152,11 +169,15 @@ class YocoPaymentService extends AbstractPaymentProvider<YocoOptions> {
         throw new YocoPaymentError("Only ZAR currency is supported", YocoErrorCode.API_ERROR)
       }
 
-      const sessionId = (context as any)?.session_id || ""
-      const resourceId = (context as any)?.resource_id || ""
+      const sessionId = this.sessionIdOf(input)
+      const resourceId = ((context as any)?.resource_id as string | undefined) || ""
 
-      // Generate idempotency key to prevent duplicate checkouts
-      const idempotencyKey = `initiate-${sessionId}-${resourceId}-${amountInCents}`
+      // One checkout per payment session and amount. A new session (e.g. a retry after a
+      // cancelled or failed payment) must get a new checkout, so never share a key across
+      // sessions: fall back to a random key if the session id is somehow missing.
+      const idempotencyKey = sessionId
+        ? `initiate-${sessionId}-${amountInCents}`
+        : `initiate-${randomUUID()}`
 
       const checkoutPayload: any = {
         amount: amountInCents,
@@ -186,6 +207,7 @@ class YocoPaymentService extends AbstractPaymentProvider<YocoOptions> {
       return {
         id: checkout.id,
         data: {
+          session_id: sessionId,
           yocoCheckoutId: checkout.id,
           redirectUrl: checkout.redirectUrl,
           status: checkout.status,
@@ -213,14 +235,15 @@ class YocoPaymentService extends AbstractPaymentProvider<YocoOptions> {
         throw new Error("Only ZAR currency supported")
       }
 
+      const sessionId = this.sessionIdOf(input)
       const checkoutPayload: any = {
         amount: amountInCents,
         currency: "ZAR",
         metadata: {
-          session_id: (context as any)?.session_id,
+          session_id: sessionId,
           resource_id: (context as any)?.resource_id,
         },
-        externalId: (context as any)?.session_id,
+        externalId: sessionId,
       }
 
       // Add redirect URLs if configured
@@ -238,6 +261,7 @@ class YocoPaymentService extends AbstractPaymentProvider<YocoOptions> {
 
       return {
         data: {
+          session_id: sessionId,
           yocoCheckoutId: checkout.id,
           redirectUrl: checkout.redirectUrl,
           status: checkout.status,
